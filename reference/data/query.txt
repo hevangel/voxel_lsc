@@ -1,0 +1,1 @@
+[out:json][timeout:60];(way(around:420,22.32920,114.18248)["building"];way(around:420,22.32920,114.18248)["leisure"];way(around:420,22.32920,114.18248)["highway"];);out geom;
