@@ -128,15 +128,15 @@
       this.ui.setProgress(1, 'Ready!');
       this.ui.showLanding();
 
-      // pointer lock on click (walk mode)
+      // pointer lock on click (walk + fly)
       const canvas = this.renderer.domElement;
       canvas.addEventListener('click', () => {
-        if (this.started && this.player.mode === 'walk' && document.pointerLockElement !== canvas) {
+        if (this.started && this.needsPointerLock(this.player.mode) && document.pointerLockElement !== canvas) {
           this.lockPointer();
         }
       });
       document.addEventListener('pointerlockchange', () => {
-        if (this.started && this.player.mode === 'walk' && document.pointerLockElement !== canvas) {
+        if (this.started && this.needsPointerLock(this.player.mode) && document.pointerLockElement !== canvas) {
           this.ui.toast('Click the view to grab the mouse · press F to fly', 3000);
         }
       });
@@ -146,7 +146,6 @@
         if (!this.started) return;
         if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space'].includes(e.code) && this.player.mode === 'tour') {
           this.setMode(this.ui._lastFreeMode || 'walk');
-          if (this.player.mode === 'walk') this.lockPointer();
         }
       });
 
@@ -257,9 +256,14 @@
       } catch (e) { /* pointer lock unavailable (e.g. embedded view) */ }
     },
 
+    /* walk and fly are both mouse-look modes; only the tour drives the camera itself */
+    needsPointerLock(m) {
+      return m === 'walk' || m === 'fly';
+    },
+
     setMode(m) {
       this.player.setMode(m);
-      if (m === 'walk') this.lockPointer();
+      if (this.needsPointerLock(m)) this.lockPointer();
       else if (document.pointerLockElement) document.exitPointerLock();
     },
 

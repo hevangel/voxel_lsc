@@ -272,9 +272,9 @@
         const mx = (e.clientX - r.left) / r.width, my = (e.clientY - r.top) / r.height;
         const wx = mx * LSC.Voxel.W, wz = my * LSC.Voxel.D;
         const y = this.app.world.world.surfaceY(Math.round(wx), Math.round(wz));
-        this.app.player.setMode('fly');
         this.app.player.teleport(wx, y + 4, wz);
         this.closePanels();
+        this.app.setMode('fly'); // via App so the pointer lock is re-grabbed on this click gesture
         this.toast(`${this.t('toastBeam')} ${Math.round(wx)}, ${Math.round(wz)}`, 1600);
       };
     }
