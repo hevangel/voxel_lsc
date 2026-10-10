@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>LSC calibration renderer (dev tool)</title>
+<style>html,body{margin:0;background:#000;overflow:hidden}#gl{position:fixed;inset:0}</style></head>
+<body>
+<div id="gl"></div>
+<script>window.LSC_BASE = '../';</script>
+<script src="../js/lib/three.min.js"></script>
+<script src="../js/crest_data.js"></script>
+<script src="../js/textures.js"></script>
+<script src="../js/geo.js"></script>
+<script src="../js/terrain_data.js"></script>
+<script src="../js/terrain.js"></script>
+<script src="../js/campus.js"></script>
+<script src="../js/context.js"></script>
+<script src="../js/sky.js"></script>
+<script src="../js/controls.js"></script>
+<script src="../js/flyover.js"></script>
+<script src="../js/paths.js"></script>
+<script src="../js/path_a.js"></script>
+<script src="../js/path_b.js"></script>
+<script src="../js/main.js"></script>
+<script>
+// Dev-only: renders model views next to reference video frames so camera
+// keys in js/paths.js can be checked. Driven by tools/calib.js (Playwright).
+window.calibReady = LSC.App.init({ noLoop: true, preserve: true, pixelRatio: 1 }).then(() => true);
+function loadImg(src) { return new Promise((r) => { const i = new Image(); i.onload = () => r(i); i.onerror = () => r(null); i.src = src; }); }
+window.calibSheet = async function (items, cols, cw, ch, mode) {
+  const A = LSC.App, R = A.renderer, cam = A.camera;
+  R.setSize(cw, ch); cam.aspect = cw / ch;
+  const rows = Math.ceil(items.length / cols);
+  const pairW = mode === 'overlay' ? cw : cw * 2;
+  const out = document.createElement('canvas');
+  out.width = cols * pairW; out.height = rows * ch;
+  const g = out.getContext('2d');
+  g.font = 'bold 18px sans-serif';
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    let p = it.pose;
+    if (!p) p = LSC.Flyover.sample(LSC.PATHS[it.path], it.t);
+    cam.fov = p.fov; cam.updateProjectionMatrix();
+    LSC.applyCamera(cam, new THREE.Vector3(p.x, p.y, p.z), p.yaw, p.pitch, p.roll);
+    A.render();
+    const ox = (i % cols) * pairW, oy = Math.floor(i / cols) * ch;
+    const img = it.frame ? await loadImg(it.frame) : null;
+    if (mode === 'overlay') {
+      if (img) { g.drawImage(img, ox, oy, cw, ch); g.globalAlpha = 0.5; }
+      g.drawImage(R.domElement, ox, oy); g.globalAlpha = 1;
+    } else {
+      if (img) g.drawImage(img, ox, oy, cw, ch);
+      g.drawImage(R.domElement, ox + cw, oy);
+    }
+    g.fillStyle = '#000'; g.fillRect(ox, oy, 150, 24);
+    g.fillStyle = '#ff0'; g.fillText((it.label || '') + ' ' + (it.t !== undefined ? it.t.toFixed(1) + 's' : ''), ox + 4, oy + 18);
+  }
+  return out.toDataURL('image/jpeg', 0.85);
+};
+</script>
+</body></html>

@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>LSC autoalign renderer (dev tool)</title>
+<style>html,body{margin:0;background:#000;overflow:hidden}#gl{position:fixed;inset:0}</style></head>
+<body>
+<div id="gl"></div>
+<script>window.LSC_BASE = '../';</script>
+<script src="../js/lib/three.min.js"></script>
+<script src="../js/textures.js"></script>
+<script src="../js/geo.js"></script>
+<script src="../js/terrain_data.js"></script>
+<script src="../js/terrain.js"></script>
+<script src="../js/campus.js"></script>
+<script src="../js/context.js"></script>
+<script src="../js/sky.js"></script>
+<script src="../js/controls.js"></script>
+<script src="../js/flyover.js"></script>
+<script src="../js/paths.js"></script>
+<script src="../js/path_a.js"></script>
+<script src="../js/path_b.js"></script>
+<script src="../js/main.js"></script>
+<script>
+/* =========================================================================
+ * autoalign.html — dev-only render harness for tools/autoalign.js.
+ *
+ * Renders the model as a flat SEMANTIC-CLASS map: every mesh material is
+ * swapped for a MeshBasicMaterial whose colour encodes a class id (sky, red
+ * track, green turf, cyan pool, white/cream building, dark roof/shadow, grey
+ * paving). The sky dome is hidden and the clear colour set to the sky class,
+ * so the whole render is flat class colours with no lighting, shadows or
+ * texture. autoalign.js reads the resulting low-res class grid back and scores
+ * it against the real frame's class grid, optimising the camera pose.
+ *
+ * Driven entirely over Playwright by autoalign.js — not part of the app.
+ * ========================================================================= */
+
+// Class ids (also mirrored in autoalign.js CLASSES). Each has a flat RGB that
+// is unique in its high bits so the class is recoverable from a read-back pixel
+// exactly (no antialias between classes: antialias is off on this renderer).
+window.AA_CLASSES = {
+  sky:    { id: 1, rgb: 0x4a90e0 },
+  red:    { id: 2, rgb: 0xc0402a },  // track + red courts
+  green:  { id: 3, rgb: 0x2f7a3a },  // turf, grass, trees, green courts
+  cyan:   { id: 4, rgb: 0x19b6c8 },  // pool water
+  white:  { id: 5, rgb: 0xf0ead8 },  // white/cream building faces, fins, parapets
+  dark:   { id: 6, rgb: 0x3a3c40 },  // roofs, dark caps, shadow, glass, estate dark bands
+  grey:   { id: 7, rgb: 0x9a968c },  // concrete paving, roads, slate, podium grey, estate walls
+};
+// 'ignore' (id 0) is never rendered; it is only produced by the real-frame
+// classifier for uncertain pixels / subtitle mask, and skipped in scoring.
+
+// Map every registered material KEY (mesh.name is the material key, set by
+// geo.js Builder.build) to a class. Keys come from js/campus.js + js/context.js
+// defMat() calls. Anything unmapped falls back by a colour heuristic below.
+window.AA_KEY_CLASS = {
+  // --- campus.js ---
+  classroom: 'white', gallery: 'white', white: 'white', cream: 'white',
+  parapet: 'white', statue: 'white', umbrella: 'white', ac: 'white',
+  net: 'white', railPanel: 'white',
+  darkcap: 'dark', roof: 'dark', darkGrey: 'dark', glass: 'dark', treeDark: 'green',
+  green: 'green', grass: 'green', greencourt: 'green', tree: 'green', palm: 'green',
+  greyPod: 'grey', concrete: 'grey', tiles: 'grey', slate: 'grey', asphalt: 'grey',
+  granite: 'grey', metal: 'grey', seat: 'grey', trunk: 'grey', planter: 'grey',
+  fence: 'grey',
+  redcourt: 'red', sports: 'red', court: 'red',
+  pool: 'cyan',
+  crest: 'white', wallSign: 'white', blueSeat: 'dark',
+  // --- context.js ---
+  estate: 'white', towerWhite: 'white', towerBeige: 'white', towerPink: 'white',
+  towerGrey: 'grey', villa: 'white', roofLight: 'grey', cityGround: 'grey',
+  road: 'grey', pitchGreen: 'green', mountain: 'green', terrain: 'grey', terrainFar: 'green',
+};
+
+// 'sports' is the stadium decal: red track + the dark pitch are baked into its
+// texture, and the pitch footprint is a separate 'pitchGreen'? No — the pitch
+// is part of the 'sports' decal texture. We cannot split a decal by material,
+// so the pitch green inside the track will read as 'red' from the model. To
+// avoid that, we overlay a flat green quad over the known pitch footprint in
+// the class pass (see installClassPass). Likewise the pool decal gives cyan.
+
+(function () {
+  const AA = window.AA_CLASSES, KC = window.AA_KEY_CLASS;
+  function classColor(name) {
+    const cls = KC[name];
+    if (cls) return AA[cls].rgb;
+    return null;
+  }
+
+  // Flat materials cache, one per class.
+  const flatMat = {};
+  function matFor(cls) {
+    if (!flatMat[cls]) flatMat[cls] = new THREE.MeshBasicMaterial({ color: AA[cls].rgb, fog: false });
+    return flatMat[cls];
+  }
+
+  let classReady = false, savedState = null, pitchMesh = null, poolMesh = null;
+
+  // Build the class pass once: remember every mesh's original material, swap in
+  // the flat class material, hide the sky dome, add flat green pitch + cyan pool
+  // overlays (the 'sports'/'pool' decals bake several classes into one texture).
+  function installClassPass() {
+    const A = LSC.App, scene = A.scene;
+    savedState = [];
+    scene.traverse((o) => {
+      if (o.isMesh) {
+        if (o === A.sky.dome) { savedState.push({ o, vis: o.visible }); o.visible = false; return; }
+        const col = classColor(o.name);
+        savedState.push({ o, mat: o.material });
+        if (col === null) {
+          // unmapped (e.g. mountains vertexColors, far-city instanced): best guess
+          if (o.name === '' || o.isInstancedMesh) o.material = matFor('white');
+          else o.material = matFor('grey');
+        } else {
+          // find the class name back from the rgb
+          let cls = 'grey';
+          for (const k in AA) if (AA[k].rgb === col) { cls = k; break; }
+          o.material = matFor(cls);
+        }
+      }
+    });
+
+    // Flat overlays for the decal-baked areas: the football pitch (green inside
+    // the red track) and the 50 m pool (cyan). Footprints from campus.js /
+    // RESEARCH_NOTES.md. Rendered just above the decal so they win the z-fight.
+    const over = new THREE.Group();
+    over.name = '__aa_overlays';
+    function quad(cls, x1, z1, x2, z2, y) {
+      const g = new THREE.PlaneGeometry(x2 - x1, z2 - z1);
+      g.rotateX(-Math.PI / 2);
+      g.translate((x1 + x2) / 2, y, (z1 + z2) / 2);
+      const m = new THREE.Mesh(g, matFor(cls));
+      m.renderOrder = 2;
+      over.add(m);
+    }
+    // dark artificial-turf football pitch x -48.5..51, z 24.5..87.5 (turf reads
+    // dark-green in the videos -> class green)
+    quad('green', -48.5, 24.5, 51, 87.5, 0.08);
+    // light-green fenced futsal/tennis court inside the east end x55..72 z40..72
+    quad('green', 55, 40, 72, 72, 0.09);
+    // 50 m pool water x -72..-22, z -80.5..-61.5
+    quad('cyan', -72, -80.5, -22, -61.5, 0.1);
+    scene.add(over);
+    pitchMesh = over;
+
+    classReady = true;
+  }
+
+  function uninstallClassPass() {
+    if (!savedState) return;
+    for (const s of savedState) {
+      if (s.mat !== undefined) s.o.material = s.mat;
+      if (s.vis !== undefined) s.o.visible = s.vis;
+    }
+    const over = LSC.App.scene.getObjectByName('__aa_overlays');
+    if (over) LSC.App.scene.remove(over);
+    savedState = null; classReady = false;
+  }
+
+  const RAD = Math.PI / 180;
+
+  // Render ONE pose into the current renderer at (gw x gh) and return a Uint8
+  // class-id grid of length gw*gh (row-major, top-left origin). Classes are
+  // recovered by nearest flat colour (exact, since the pass is flat + no AA).
+  const CLASS_LIST = Object.keys(AA);
+  const CLASS_RGB = CLASS_LIST.map((k) => {
+    const c = AA[k].rgb;
+    return [c >> 16 & 255, c >> 8 & 255, c & 255, AA[k].id];
+  });
+  function classifyRenderPixel(r, g, b) {
+    let best = 0, bestD = 1e9;
+    for (const [cr, cg, cb, id] of CLASS_RGB) {
+      const d = (r - cr) * (r - cr) + (g - cg) * (g - cg) + (b - cb) * (b - cb);
+      if (d < bestD) { bestD = d; best = id; }
+    }
+    return best;
+  }
+
+  const _readCanvas = document.createElement('canvas');
+  const _rc = _readCanvas.getContext('2d', { willReadFrequently: true });
+
+  window.aaReady = LSC.App.init({ noLoop: true, preserve: true, pixelRatio: 1 }).then(() => {
+    installClassPass();
+    // flat clear colour = sky class; no tone mapping / encoding tricks on flat colours
+    LSC.App.renderer.setClearColor(AA.sky.rgb, 1);
+    LSC.App.renderer.toneMapping = THREE.NoToneMapping;
+    LSC.App.renderer.outputEncoding = THREE.LinearEncoding;
+    LSC.App.scene.fog = null;
+    LSC.App.scene.background = null;
+    return true;
+  });
+
+  // Render a batch of poses at grid resolution gw x gh. poses: array of
+  // {x,y,z,yaw,pitch,roll,fov}. Returns array of {grid:[...], } as a flat
+  // typed structure encoded to a base64 string (one byte per cell) so a large
+  // batch crosses the Playwright bridge compactly.
+  window.aaRenderClassBatch = function (poses, gw, gh) {
+    const A = LSC.App, R = A.renderer, cam = A.camera;
+    R.setSize(gw, gh, false);
+    cam.aspect = gw / gh;
+    _readCanvas.width = gw; _readCanvas.height = gh;
+    const out = [];
+    for (const p of poses) {
+      cam.fov = p.fov; cam.updateProjectionMatrix();
+      LSC.applyCamera(cam, new THREE.Vector3(p.x, p.y, p.z), p.yaw, p.pitch, p.roll);
+      R.render(A.scene, cam);
+      // draw the GL canvas into a 2d canvas to read pixels (flips y: GL origin
+      // is bottom-left, 2d drawImage gives top-left origin which is what we want)
+      _rc.drawImage(R.domElement, 0, 0, gw, gh);
+      const data = _rc.getImageData(0, 0, gw, gh).data;
+      const grid = new Uint8Array(gw * gh);
+      for (let i = 0, j = 0; i < grid.length; i++, j += 4) {
+        grid[i] = classifyRenderPixel(data[j], data[j + 1], data[j + 2]);
+      }
+      // base64 encode
+      let bin = '';
+      for (let i = 0; i < grid.length; i++) bin += String.fromCharCode(grid[i]);
+      out.push(btoa(bin));
+    }
+    return out;
+  };
+
+  // Render ONE pose to a normal-looking PREVIEW (flat class colours, full size)
+  // as a data URL, for the verification sheet's class-overlay column.
+  window.aaRenderClassImage = function (pose, w, h) {
+    const A = LSC.App, R = A.renderer, cam = A.camera;
+    R.setSize(w, h, false);
+    cam.aspect = w / h;
+    cam.fov = pose.fov; cam.updateProjectionMatrix();
+    LSC.applyCamera(cam, new THREE.Vector3(pose.x, pose.y, pose.z), pose.yaw, pose.pitch, pose.roll);
+    R.render(A.scene, cam);
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    c.getContext('2d').drawImage(R.domElement, 0, 0, w, h);
+    return c.toDataURL('image/png');
+  };
+
+  // Expose colliders list for pose rejection in autoalign.js.
+  window.aaColliders = function () { return LSC.App.colliders.list; };
+
+  window.aaUninstall = uninstallClassPass;
+})();
+</script>
+</body></html>
