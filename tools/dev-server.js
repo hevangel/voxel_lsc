@@ -12,4 +12,4 @@ http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': types[path.extname(fp)] || 'application/octet-stream', 'Cache-Control': 'no-store' });
     res.end(data);
   });
-}).listen(8137, () => console.log('serving ' + ROOT + ' on :8137'));
+}).listen(8137, '127.0.0.1', () => console.log('serving ' + ROOT + ' on :8137'));
