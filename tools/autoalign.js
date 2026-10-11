@@ -338,6 +338,7 @@ function applyToSource(def, src, solutions, pathKey) {
   lines.push(`LSC.PATHS.${pathKey} = {`);
   lines.push(`  title: ${JSON.stringify(def.title)},`);
   lines.push(`  video: ${JSON.stringify(def.video)},`);
+  if (def.youtube) lines.push(`  youtube: ${JSON.stringify(def.youtube)},`);
   lines.push(`  duration: ${def.duration},`);
   lines.push(`  vfov: ${def.vfov},`);
   lines.push('  shots: [');

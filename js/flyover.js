@@ -54,33 +54,205 @@ window.LSC = window.LSC || {};
     return { x: k[1], y: k[2], z: k[3], yaw: k[4], pitch: k[5], roll: k[6], fov: k[7] || def, shot };
   }
 
+  /* ---------------------------------------------------------------------
+   * YouTube stand-in for the <video> element. The reference .mp4 files are
+   * gitignored, so on GitHub Pages the clip comes from YouTube instead. This
+   * exposes the subset of HTMLMediaElement that Flyover and ui.js use
+   * (currentTime, paused, muted, readyState, play, pause, onended, onerror),
+   * so nothing else needs to know which source is playing.
+   * The IFrame API only refreshes getCurrentTime() a few times a second, so
+   * currentTime is extrapolated from the last report to keep the camera smooth.
+   * ------------------------------------------------------------------- */
+  let ytApi = null;
+  function loadYouTubeApi() {
+    if (ytApi) return ytApi;
+    ytApi = new Promise((resolve, reject) => {
+      if (window.YT && window.YT.Player) { resolve(window.YT); return; }
+      const prev = window.onYouTubeIframeAPIReady;
+      window.onYouTubeIframeAPIReady = () => { if (prev) prev(); resolve(window.YT); };
+      const s = document.createElement('script');
+      s.src = 'https://www.youtube.com/iframe_api';
+      s.async = true;
+      s.onerror = () => { ytApi = null; reject(new Error('YouTube API failed to load')); };
+      document.head.appendChild(s);
+      setTimeout(() => reject(new Error('YouTube API timed out')), 15000);
+    });
+    return ytApi;
+  }
+
+  class YouTubeVideo {
+    constructor(host, id, muted) {
+      this.onended = null; this.onerror = null;
+      this.readyState = 0;
+      this._muted = !!muted;
+      this._want = true;              // play() requested and not since paused
+      this._state = -1;
+      this._base = 0; this._stamp = performance.now(); this._last = 0;
+      this._dead = false;
+      const el = document.createElement('div');
+      host.innerHTML = ''; host.appendChild(el);
+      loadYouTubeApi().then((YT) => {
+        if (this._dead) return;
+        this.player = new YT.Player(el, {
+          videoId: id, width: '100%', height: '100%',
+          playerVars: {
+            autoplay: 1, controls: 0, disablekb: 1, fs: 0, rel: 0, playsinline: 1,
+            modestbranding: 1, iv_load_policy: 3, mute: this._muted ? 1 : 0, origin: location.origin,
+          },
+          events: {
+            onReady: () => {
+              this.readyState = 1;
+              if (this._muted) this.player.mute(); else this.player.unMute();
+              if (this._base > 0) this.player.seekTo(this._base, true);
+              if (this._want) this._kick();
+            },
+            onStateChange: (e) => {
+              this._state = e.data;
+              this._sync(true);
+              if (e.data === 0 && this.onended) this.onended();
+            },
+            onError: () => this._fail(),
+          },
+        });
+      }, () => this._fail());
+    }
+    _fail() { if (!this._dead && this.onerror) this.onerror(); }
+    // Browsers may refuse autoplay with sound; if it has not started shortly, retry muted.
+    _kick() {
+      this.player.playVideo();
+      clearTimeout(this._kickT);
+      this._kickT = setTimeout(() => {
+        if (this._dead || !this._want || this._state === 1 || this._state === 3) return;
+        this.muted = true;
+        this.player.playVideo();
+        if (LSC.UI) { LSC.UI.toast('Video started muted — the browser blocked sound.'); LSC.UI.syncMute(); }
+      }, 1500);
+    }
+    _sync(force) {
+      if (!this.player || !this.player.getCurrentTime) return;
+      const t = this.player.getCurrentTime() || 0;
+      if (force || t !== this._reported) { this._reported = t; this._base = t; this._stamp = performance.now(); }
+    }
+    get currentTime() {
+      this._sync(false);
+      let t = this._base;
+      if (this._state === 1) t += (performance.now() - this._stamp) / 1000;
+      // never step backwards by a few frames when a fresh (slightly lower) report lands
+      if (this._state === 1 && t < this._last && this._last - t < 0.5) t = this._last;
+      this._last = t;
+      return t;
+    }
+    set currentTime(t) {
+      this._base = t; this._last = t; this._stamp = performance.now();
+      if (this.player && this.player.seekTo) this.player.seekTo(t, true);
+    }
+    get paused() { return this.player && this.readyState ? this._state !== 1 && this._state !== 3 : !this._want; }
+    get muted() { return this._muted; }
+    set muted(m) {
+      this._muted = !!m;
+      if (this.player && this.player.mute) { if (m) this.player.mute(); else this.player.unMute(); }
+    }
+    play() {
+      this._want = true;
+      if (this.player && this.readyState) this._kick();
+      return Promise.resolve();
+    }
+    pause() {
+      this._want = false;
+      clearTimeout(this._kickT);
+      if (this.player && this.player.pauseVideo) this.player.pauseVideo();
+    }
+    destroy() {
+      this._dead = true;
+      clearTimeout(this._kickT);
+      if (this.player && this.player.destroy) this.player.destroy();
+      this.player = null;
+    }
+  }
+
+  /* Which source to play: ?video=youtube|local forces one. Otherwise GitHub Pages
+   * uses YouTube (the .mp4s are not published) and everything else tries the
+   * local .mp4 first, falling back to YouTube over http and to a timer from disk. */
+  function videoPreference() {
+    const q = new URLSearchParams(location.search).get('video');
+    if (q === 'youtube' || q === 'local') return q;
+    return /\.github\.io$/i.test(location.hostname) ? 'youtube' : 'local';
+  }
+
   class Flyover {
     constructor(app) {
       this.app = app;
       this.active = null;
-      this.video = document.getElementById('pipVideo');
+      this.localVideo = document.getElementById('pipVideo');
+      this.ytHost = document.getElementById('pipYT');
+      this.video = this.localVideo;
       this.clock = 0;
       this.useClock = false;
     }
     start(key) {
       const path = LSC.PATHS[key];
       if (!path) return;
-      this.key = key; this.active = path; this.clock = 0; this.useClock = false;
-      const v = this.video;
-      if (v) {
-        v.src = path.video;
-        v.currentTime = 0;
-        v.muted = !!this.muted;
-        const p = v.play();
-        if (p && p.catch) p.catch(() => { v.muted = true; this.muted = true; v.play().catch(() => { this.useClock = true; }); });
-        v.onerror = () => { this.useClock = true; if (LSC.UI) LSC.UI.toast('Reference video not found — flying the path on a timer.'); };
-        v.onended = () => this.finish();
-      } else this.useClock = true;
+      this.key = key; this.active = path; this.clock = 0; this.useClock = false; this.paused = false;
+      const pref = videoPreference();
+      const canYT = !!(path.youtube && this.ytHost && location.protocol !== 'file:');
+      if (pref === 'youtube' && canYT) this.playYouTube(path);
+      else this.playLocal(path, canYT && pref !== 'local');
       this.app.setMode('flyover');
       if (LSC.UI) LSC.UI.onFlyover(path);
     }
+    showSource(yt) {
+      if (this.localVideo) this.localVideo.classList.toggle('hidden', yt);
+      if (this.ytHost) this.ytHost.classList.toggle('hidden', !yt);
+    }
+    dropYouTube() {
+      if (this.yt) { this.yt.destroy(); this.yt = null; }
+    }
+    toTimer(msg) {
+      this.useClock = true;
+      if (LSC.UI) { LSC.UI.toast(msg); LSC.UI.syncMute(); }
+    }
+    playLocal(path, ytFallback) {
+      this.dropYouTube();
+      const v = this.localVideo;
+      this.video = v;
+      if (!v) { this.useClock = true; return; }
+      this.showSource(false);
+      const active = path;
+      v.onerror = () => {
+        if (this.active !== active) return;
+        if (ytFallback) this.playYouTube(path, this.time());
+        else this.toTimer('Reference video not found — flying the path on a timer.');
+      };
+      v.onended = () => this.finish();
+      v.src = path.video;
+      v.currentTime = 0;
+      v.muted = !!this.muted;
+      const p = v.play();
+      if (p && p.catch) p.catch((err) => {
+        if (this.active !== active || (err && err.name !== 'NotAllowedError')) return;
+        v.muted = true; this.muted = true;
+        if (LSC.UI) LSC.UI.syncMute();
+        v.play().catch(() => {});
+      });
+    }
+    playYouTube(path, at) {
+      if (this.localVideo) { this.localVideo.onerror = null; this.localVideo.pause(); this.localVideo.removeAttribute('src'); this.localVideo.load(); }
+      this.dropYouTube();
+      this.showSource(true);
+      const active = path;
+      const yt = new YouTubeVideo(this.ytHost, path.youtube, this.muted);
+      if (at) yt.currentTime = at;
+      yt.onended = () => { if (this.active === active) this.finish(); };
+      yt.onerror = () => {
+        if (this.active !== active || this.yt !== yt) return;
+        this.showSource(false);
+        this.toTimer('YouTube video unavailable — flying the path on a timer.');
+      };
+      this.yt = yt; this.video = yt;
+    }
     time() {
-      if (!this.useClock && this.video && this.video.readyState >= 1) return this.video.currentTime;
+      // the YouTube stand-in already holds the intended time while it loads
+      if (!this.useClock && this.video && (this.video.readyState >= 1 || this.video === this.yt)) return this.video.currentTime;
       return this.clock;
     }
     togglePause() {
