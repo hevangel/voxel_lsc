@@ -69,7 +69,9 @@ index.html
 
 ### Flyover paths
 
-`LSC.PATHS.X = { title, video, duration, vfov, shots: [{ t0, t1, keys: [[t,x,y,z,yaw,pitch,roll,vfov?]…] }] }`.
+`LSC.PATHS.X = { title, video, youtube, duration, vfov, shots: [{ t0, t1, keys: [[t,x,y,z,yaw,pitch,roll,vfov?]…] }] }`.
+The `.mp4`s are gitignored, so on GitHub Pages the PiP embeds the YouTube copy (`youtube` id) via a
+`<video>`-like wrapper in `flyover.js`; locally the `.mp4` plays first (`?video=youtube|local` forces one).
 Shots split only at real cuts/dissolves and must cover 0..duration contiguously; keys inside a
 shot are Catmull-Rom. The flyover reads `video.currentTime`, so pause/seek move the camera; if
 the video is missing it falls back to a timer.

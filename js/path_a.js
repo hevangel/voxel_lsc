@@ -5,6 +5,7 @@
 LSC.PATHS.A = {
   title: 'School Song aerial film',
   video: 'reference/video/lsc_aerial_ERq74Xv4GY0.mp4',
+  youtube: 'ERq74Xv4GY0',
   duration: 207.84,
   vfov: 50,
   shots: [

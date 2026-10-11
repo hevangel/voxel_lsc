@@ -5,6 +5,7 @@
 LSC.PATHS.B = {
   title: "FPV drone flyover",
   video: "reference/video/lsc_drone_flyover_d8X8myGUXjo.mp4",
+  youtube: "d8X8myGUXjo",
   duration: 163.37,
   vfov: 74,
   shots: [
